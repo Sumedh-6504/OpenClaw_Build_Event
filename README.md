@@ -200,7 +200,7 @@ Handles large directories gracefully
 
 If modifying scan path in server.js:
 
-Keep it within /home/suemdh
+Keep it within /home/<your-username>
 
 Do not allow /mnt/c
 
