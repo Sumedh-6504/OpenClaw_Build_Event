@@ -10,17 +10,18 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIo(server);
 
-const SCAN_DIRECTORY = '/home/suemdh'; // Strict directory scope
-const IGNORED_DIRS = ['.git', 'node_modules', '.openclaw', 'file-analyzer-dashboard']; // Ignore hidden and specific dirs, and the dashboard itself to prevent self-monitoring
+const SCAN_DIRECTORY = process.env.SCAN_DIRECTORY || process.cwd(); // Scan current working directory by default
+const IGNORED_DIRS = ['.git', 'node_modules', '.openclaw', 'file-analyzer-dashboard', 'public']; // Ignore hidden and specific dirs
 const IGNORED_FILES = ['.DS_Store']; // Ignore specific files
-const THROTTLE_MS = 2000; // Throttle updates to max once every 2 seconds
+const DEBOUNCE_MS = 2000; // Debounce updates to group changes
 
 let fileStats = {
     totalDiskUsage: 0,
     filesByType: {},
     fileTrend: [], // For line chart, could store { timestamp, totalSize }
-    lastUpdateTime: Date.now()
 };
+
+let updateTimeout = null;
 
 // --- Security Helper ---
 function isSafePath(filePath) {
@@ -52,7 +53,7 @@ async function scanDirectory(dirPath) {
         const fullPath = path.join(dirPath, itemName);
 
         if (!isSafePath(fullPath)) {
-            console.warn(\`Skipping unsafe path: \${fullPath}\`);
+            console.warn(`Skipping unsafe path: ${fullPath}`);
             continue;
         }
 
@@ -87,7 +88,7 @@ async function scanDirectory(dirPath) {
             }
         } catch (error) {
             if (error.code !== 'ENOENT' && error.code !== 'EACCES') { // Log non-permission/not-found errors
-                console.error(\`Error processing \${fullPath}: \${error.message}\`);
+                console.error(`Error processing ${fullPath}: ${error.message}`);
             }
         }
     }
@@ -95,15 +96,9 @@ async function scanDirectory(dirPath) {
 }
 
 // --- Update and Broadcast Function ---
-async function updateAndBroadcast() {
-    const now = Date.now();
-    if (now - fileStats.lastUpdateTime < THROTTLE_MS) {
-        // Too soon since last broadcast, skip for now.
-        return;
-    }
-
+async function performUpdateAndBroadcast() {
     try {
-        console.log(\`Scanning directory: \${SCAN_DIRECTORY}\`);
+        console.log(`Scanning directory: ${SCAN_DIRECTORY}`);
         const stats = await scanDirectory(SCAN_DIRECTORY);
 
         // Update fileTrend for the line chart
@@ -115,11 +110,10 @@ async function updateAndBroadcast() {
 
         fileStats = {
             ...stats,
-            fileTrend: fileStats.fileTrend,
-            lastUpdateTime: now // Update timestamp for throttling
+            fileTrend: fileStats.fileTrend
         };
 
-        console.log(\`Broadcasting updated stats. Total size: \${fileStats.totalDiskUsage} bytes\`);
+        console.log(`Broadcasting updated stats. Total size: ${fileStats.totalDiskUsage} bytes`);
         io.emit('file_stats_update', fileStats);
 
     } catch (error) {
@@ -128,10 +122,20 @@ async function updateAndBroadcast() {
     }
 }
 
+function updateAndBroadcast() {
+    if (updateTimeout) {
+        clearTimeout(updateTimeout);
+    }
+    updateTimeout = setTimeout(async () => {
+        await performUpdateAndBroadcast();
+        updateTimeout = null;
+    }, DEBOUNCE_MS);
+}
+
 // --- Initial Scan and Watcher Setup ---
 async function initialize() {
     // Perform initial scan on startup
-    await updateAndBroadcast(); 
+    await performUpdateAndBroadcast(); 
 
     // Setup Chokidar watcher
     const watcher = chokidar.watch(SCAN_DIRECTORY, {
@@ -152,37 +156,37 @@ async function initialize() {
     watcher
         .on('add', async (filePath) => {
             if (isSafePath(filePath)) { // Double check path safety
-                console.log(\`File added: \${filePath}\`);
+                console.log(`File added: ${filePath}`);
                 await updateAndBroadcast();
             }
         })
         .on('change', async (filePath) => {
             if (isSafePath(filePath)) { // Double check path safety
-                console.log(\`File changed: \${filePath}\`);
+                console.log(`File changed: ${filePath}`);
                 await updateAndBroadcast();
             }
         })
         .on('unlink', async (filePath) => {
             if (isSafePath(filePath)) { // Double check path safety
-                console.log(\`File removed: \${filePath}\`);
+                console.log(`File removed: ${filePath}`);
                 await updateAndBroadcast();
             }
         })
         .on('addDir', async (dirPath) => {
             if (isSafePath(dirPath)) { // Double check path safety
-                console.log(\`Directory added: \${dirPath}\`);
+                console.log(`Directory added: ${dirPath}`);
                 await updateAndBroadcast();
             }
         })
         .on('unlinkDir', async (dirPath) => {
             if (isSafePath(dirPath)) { // Double check path safety
-                console.log(\`Directory removed: \${dirPath}\`);
+                console.log(`Directory removed: ${dirPath}`);
                 await updateAndBroadcast();
             }
         })
-        .on('error', (error) => console.error(\`Watcher error: \${error}\`));
+        .on('error', (error) => console.error(`Watcher error: ${error}`));
 
-    console.log(\`Watcher started for \${SCAN_DIRECTORY}\`);
+    console.log(`Watcher started for ${SCAN_DIRECTORY}`);
 }
 
 // --- Server Setup ---
@@ -196,7 +200,7 @@ app.get('/api/file-stats', (req, res) => {
 
 // Fallback route to serve index.html for any other GET requests,
 // allowing frontend routing if we were to use a framework like React/Vue later.
-app.get('*', (req, res) => {
+app.get(/(.*)/, (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
@@ -212,7 +216,7 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(\`Server listening on port \${PORT}\`);
+    console.log(`Server listening on port ${PORT}`);
     // Start the initialization process (scan and watch)
     initialize().catch(err => {
         console.error('Failed to initialize application:', err);
